@@ -34,6 +34,11 @@
   button:focus-visible, a:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
   button:disabled { opacity: .55; cursor: progress; }
 
+  .pick { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 20px; font-family: var(--display); }
+  .pick label { color: var(--muted); font-weight: 500; }
+  .pick input { font: 500 1rem/1 var(--display); color: var(--ink); background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 12px 14px; }
+  button.secondary { background: transparent; color: var(--ink); border: 2px solid var(--flare); padding: 12px 22px; }
+
   .stage { background: var(--panel); border-radius: 6px; min-height: 280px; display: grid; place-items: center; overflow: hidden; }
   .stage img { display: block; width: 100%; max-height: 78vh; object-fit: contain; background: #000; }
   .stage p { white-space: pre-line; word-break: break-word; color: var(--muted); padding: 40px 20px; margin: 0; text-align: center; max-width: 52ch; }
@@ -54,6 +59,12 @@
     <h1>Astronomy Picture of the Day, random date</h1>
     <button id="go" type="button">Pick another day</button>
   </div>
+
+  <form class="pick" id="pick">
+    <label for="day">Show a specific day</label>
+    <input type="date" id="day" min="1995-06-16" required>
+    <button type="submit" class="secondary" id="show">Show this day</button>
+  </form>
 
   <div class="stage" id="stage" aria-live="polite"><p>Loading a random day…</p></div>
 
@@ -85,6 +96,10 @@ let scienceBlocked = false;    // true once the browser refuses to talk to scien
 
 const $ = id => document.getElementById(id);
 const stage = $('stage'), info = $('info'), go = $('go');
+const form = $('pick'), dayInput = $('day'), showBtn = $('show');
+const todayISO = new Date().toISOString().slice(0, 10);
+dayInput.max = todayISO;
+const setBusy = busy => { go.disabled = showBtn.disabled = busy; };
 
 // Random UTC day between the first APOD and yesterday (today's may not be published yet).
 function randomISODate() {
@@ -139,17 +154,30 @@ async function fetchFromApi() {
     }
   }
   const raw = queue.shift();
-  if (!raw) return null;
+  return raw ? normalize(raw) : null;
+}
+
+// Turn an api.nasa.gov item into the same shape as the science.nasa.gov items.
+function normalize(raw) {
   const [y, m, d] = raw.date.split('-');
-  return {                      // same shape as the science.nasa.gov items
+  return {
     date: raw.date,
     title: raw.title,
+    media_type: raw.media_type,
     explanation: raw.explanation,
     credit: raw.copyright,
     alt: '',
     hdurl: raw.hdurl || raw.url,
     permalink: `https://apod.nasa.gov/apod/ap${y.slice(2)}${m}${d}.html`
   };
+}
+
+// One specific day: science.nasa.gov first, then api.nasa.gov.
+async function lookupDate(iso) {
+  const item = await fetchDay(iso);
+  if (item) return item;
+  const raw = await getJSON(`${FALLBACK_API}?api_key=${NASA_KEY}&date=${iso}`);
+  return raw && raw.date === iso ? normalize(raw) : null;
 }
 
 const isUsable = item => item && item.media_type === 'image' && item.hdurl;
@@ -182,8 +210,14 @@ async function loadImage(url) {
 }
 
 function show(item, img, note) {
-  img.alt = item.alt || item.title;
-  stage.replaceChildren(img);
+  if (img) {
+    img.alt = item.alt || item.title;
+    stage.replaceChildren(img);
+  } else {
+    stage.replaceChildren(Object.assign(document.createElement('p'),
+      { textContent: 'This day’s entry is a video, so there’s no picture to show. Open it on NASA’s site.' }));
+  }
+  dayInput.value = item.date;
   $('date').textContent = new Date(item.date + 'T00:00:00Z')
     .toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
   $('title').textContent = item.title;
@@ -192,7 +226,8 @@ function show(item, img, note) {
   if (note) paragraphs.unshift(note);
   $('explain').replaceChildren(...paragraphs.map(t => Object.assign(document.createElement('p'), { textContent: t })));
   $('page').href = item.permalink || item.url;
-  $('hd').href = item.hdurl;
+  $('hd').hidden = !img;
+  if (img) $('hd').href = item.hdurl;
   info.hidden = false;
 }
 
@@ -201,8 +236,30 @@ function message(text) {
   stage.replaceChildren(Object.assign(document.createElement('p'), { textContent: text }));
 }
 
+function failText(headline) {
+  const reasons = [...new Set(diag)].slice(0, 3).join('\n');
+  return headline + '\n' + (reasons || 'No details were captured; check the browser console.') +
+    '\nIf this file was opened from disk, serve it with a local web server and try again.';
+}
+
+async function showDay(iso) {
+  setBusy(true);
+  diag.length = 0;
+  message('Loading that day…');
+  try {
+    const item = await lookupDate(iso);
+    if (!item) throw new Error('no data');
+    const picture = item.media_type === 'image' && item.hdurl;
+    show(item, picture ? await loadImage(item.hdurl) : null);
+  } catch {
+    message(failText('Couldn’t load that day. It may not be published yet.'));
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function roll() {
-  go.disabled = true;
+  setBusy(true);
   diag.length = 0;
   message('Loading a random day…');
   try {
@@ -224,15 +281,22 @@ async function roll() {
     if (!item) throw new Error('no data');
     show(item, await loadImage(item.hdurl), note);
   } catch {
-    const reasons = [...new Set(diag)].slice(0, 3).join('\n');
-    message('Couldn’t load a picture.\n' + (reasons || 'No details were captured; check the browser console.') +
-      '\nIf this file was opened from disk, serve it with a local web server and try again.');
+    message(failText('Couldn’t load a picture.'));
   } finally {
-    go.disabled = false;
+    setBusy(false);
   }
 }
 
 go.addEventListener('click', roll);
+form.addEventListener('submit', event => {
+  event.preventDefault();
+  const iso = dayInput.value;
+  if (!iso || iso < '1995-06-16' || iso > todayISO) {
+    message('Pick a date between 16 June 1995 and today.');
+    return;
+  }
+  showDay(iso);
+});
 roll();
 </script>
 </body>
