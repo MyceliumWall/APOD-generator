@@ -75,6 +75,14 @@ const FIRST_DAY = Date.UTC(1995, 5, 16);   // first APOD
 const DAY = 86400000;
 const MAX_TRIES = 6;
 
+// Fallback source: api.nasa.gov allows requests from any website (CORS: *).
+// DEMO_KEY is shared and limited (about 30 requests/hour, 50/day); a free personal key
+// from https://api.nasa.gov removes most of that limit.
+const NASA_KEY = ' QrhcdTNKbCDGppb6FwcbHKNf6HRbPw6knWBFm8Nc ';
+const FALLBACK_API = 'https://api.nasa.gov/planetary/apod';
+const queue = [];              // random pictures from the fallback, 10 per request
+let scienceBlocked = false;    // true once the browser refuses to talk to science.nasa.gov
+
 const $ = id => document.getElementById(id);
 const stage = $('stage'), info = $('info'), go = $('go');
 
@@ -94,6 +102,7 @@ async function getJSON(url) {
     if (!res.ok) { diag.push(`HTTP ${res.status} from ${url}`); return null; }
     return await res.json();
   } catch (e) {
+    if (url.startsWith(API)) scienceBlocked = true;
     diag.push(`Request failed (${e.name}: blocked by the browser, offline, or not JSON) for ${url}`);
     return null;
   }
@@ -102,6 +111,7 @@ async function getJSON(url) {
 // The API's own item ids are YYMMDD (see basic_html_url in the feed), so try that first,
 // then fall back to a WordPress date-range query.
 async function fetchDay(iso) {
+  if (scienceBlocked) return null;
   const id = iso.slice(2, 4) + iso.slice(5, 7) + iso.slice(8, 10);
   const urls = [
     `${API}/${id}`,
@@ -119,6 +129,27 @@ async function fetchRecentImage() {
   const list = await getJSON(`${API}?per_page=10`);
   const images = (Array.isArray(list) ? list : []).filter(isUsable);
   return images.length ? images[Math.floor(Math.random() * images.length)] : null;
+}
+
+async function fetchFromApi() {
+  if (!queue.length) {
+    const list = await getJSON(`${FALLBACK_API}?api_key=${NASA_KEY}&count=10`);
+    if (Array.isArray(list)) {
+      queue.push(...list.filter(i => i.media_type === 'image' && (i.hdurl || i.url)));
+    }
+  }
+  const raw = queue.shift();
+  if (!raw) return null;
+  const [y, m, d] = raw.date.split('-');
+  return {                      // same shape as the science.nasa.gov items
+    date: raw.date,
+    title: raw.title,
+    explanation: raw.explanation,
+    credit: raw.copyright,
+    alt: '',
+    hdurl: raw.hdurl || raw.url,
+    permalink: `https://apod.nasa.gov/apod/ap${y.slice(2)}${m}${d}.html`
+  };
 }
 
 const isUsable = item => item && item.media_type === 'image' && item.hdurl;
@@ -176,13 +207,19 @@ async function roll() {
   message('Loading a random day…');
   try {
     let item = null, note = '';
-    for (let i = 0; i < MAX_TRIES && !item; i++) {
+    for (let i = 0; i < MAX_TRIES && !item && !scienceBlocked; i++) {
       const candidate = await fetchDay(randomISODate());
       if (isUsable(candidate)) item = candidate;   // skips videos and missing dates
     }
     if (!item) {
+      item = await fetchFromApi();
+      if (item) note = scienceBlocked
+        ? 'science.nasa.gov couldn’t be reached from this page, so this random day came from api.nasa.gov instead.'
+        : 'The science.nasa.gov date lookup didn’t return a picture, so this random day came from api.nasa.gov instead.';
+    }
+    if (!item && !scienceBlocked) {
       item = await fetchRecentImage();
-      note = 'The date lookup didn’t return a picture, so this is a random recent one instead.';
+      note = 'Date lookups failed, so this is a random recent picture instead.';
     }
     if (!item) throw new Error('no data');
     show(item, await loadImage(item.hdurl), note);
